@@ -41,7 +41,7 @@ def lambda_handler(event, context):
         ]).get('Tags', [])
         asg_name = next((t['Value'] for t in asg_tags if t['Key'] == 'aws:autoscaling:groupName'), None)
 
-        if not asg_name:  # ASG 소속이기만 하면 통과
+        if not (asg_name and asg_name.startswith('CodeDeploy_')):
             continue
 
         alarm_tags = ec2.describe_tags(Filters=[
