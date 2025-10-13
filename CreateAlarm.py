@@ -1,127 +1,120 @@
-# 최종 20250731 마무리
-
 import boto3
-import json
 from datetime import datetime, timedelta
 
-# #(local용)
-#session = boto3.Session(
-#    aws_access_key_id="계정 Access Key",
-#    aws_secret_access_key="계정 Secret Key",
-#    region_name=SUPPORT_REGION,  # 세션의 기본 리전도 맞춰둠
-# )
-# ec2 = session.client('ec2')  # ec2 객체 생성
-# cloudwatch = session.client('cloudwatch')  # cloudwatch 객체 생성
-
-# # (aws lambda용)
-ec2 = boto3.client('ec2')  # ec2 객체 생성
-cloudwatch = boto3.client('cloudwatch')  # cloudwatch 객체 생성
 
 
-def lambda_handler(event, context):  # event와, context는 각각 이벤트가 발생하면 aws에서 넣어주는 데이터와, 내부 구성 객체를 의미
-    print("event 문규 테스트1")  # 차후 삭제
-    print("Received event:", event)
+# AWS SDK 클라이언트 초기화
+ec2 = boto3.client('ec2')
+cloudwatch = boto3.client('cloudwatch')
 
-    #### 이벤트가 EC2 인스턴스 생성 이벤트인지 판별
-    if event.get('detail', {}).get('eventName') != 'RunInstances':  # RunInstances 이벤트가 아니면 종료
-        print("Not an EC2 RunInstances event.")
-        print("event 문규 테스트2")  # 차후 삭제
+
+def lambda_handler(event, context):
+    """
+    EC2 인스턴스가 Auto Scaling Group에 의해 생성되었을 때 알람을 자동으로 설정하는 Lambda 핸들러
+    """
+    if event.get('detail', {}).get('eventName') != 'RunInstances':
         return
-    # event : EventBridge, API Gateway, S3, CloudTrail 등 **트리거(source)**가 발생시 전달되는 JSON 데이터.    # 예: CloudTrail 이벤트일 경우 CloudTrail 로그 구조와 동일한 데이터
-    # context : Lambda 실행 환경 정보 (실행 시간, 함수 이름, AWS 요청 ID 등 포함된 메타 정보 객체)
 
-    # [변경] responseElements 존재 여부 체크 (NoneType 오류 방지)
     response_elements = event.get('detail', {}).get('responseElements')
     if not response_elements:
-        print("No responseElements found in the event. Skipping.")
-        print("event 문규 테스트3")  # 차후 삭제
         return
 
-    # [변경] instancesSet 하위 items 접근 전 안전하게 처리
     instances_set = response_elements.get('instancesSet', {})
     instances = instances_set.get('items', [])
     if not instances:
-        print("No instances found in the event. Skipping.")
-        print("event 문규 테스트4")  # 차후 삭제
         return
 
-    for instance in instances:  # 인스턴스 각각에 대해 순회
+    for instance in instances:
         instance_id = instance['instanceId']
 
-        # [추가] EC2 인스턴스의 이름(Name 태그) 추출
-        name_tag_response = ec2.describe_tags(
-            Filters=[
-                {'Name': 'resource-id', 'Values': [instance_id]},
-                {'Name': 'key', 'Values': ['Name']}
-            ]
-        )
-        name_tags = name_tag_response.get('Tags', [])
-        name_tag = next((tag for tag in name_tags if tag['Key'] == 'Name'), None)
-        instance_name = name_tag['Value'] if name_tag else instance_id  # 이름 없으면 ID 사용
-        print("event 문규 테스트5")  # 차후 삭제
+        # EC2 Name 태그 추출
+        name_tags = ec2.describe_tags(Filters=[
+            {'Name': 'resource-id', 'Values': [instance_id]},
+            {'Name': 'key', 'Values': ['Name']}
+        ]).get('Tags', [])
+        instance_name = next((tag['Value'] for tag in name_tags if tag['Key'] == 'Name'), instance_id)
 
-        # [추가] Auto Scaling Group 이름이 'asg-smk3'인지 확인
-        # EC2 인스턴스에 할당된 태그 중 'aws:autoscaling:groupName' 키의 값을 확인
-        asg_tags_response = ec2.describe_tags(
-            Filters=[
-                {'Name': 'resource-id', 'Values': [instance_id]},
-                {'Name': 'key', 'Values': ['aws:autoscaling:groupName']}
-            ]
-        )
+        # AutoScalingGroup 태그 추출 및 asg-smk3 여부 확인
+        asg_tags = ec2.describe_tags(Filters=[
+            {'Name': 'resource-id', 'Values': [instance_id]},
+            {'Name': 'key', 'Values': ['aws:autoscaling:groupName']}
+        ]).get('Tags', [])
+        asg_name = next((t['Value'] for t in asg_tags if t['Key'] == 'aws:autoscaling:groupName'), None)
 
-        asg_tags = asg_tags_response.get('Tags', [])  # 반환값에서 태그 목록 추출
-        asg_tag = next(
-            (tag for tag in asg_tags if tag['Key'] == 'aws:autoscaling:groupName' and tag['Value'] == 'asg-smk3'),
-            None
-        )
-        if not asg_tag:  # asg-smk3에 속하지 않은 경우 건너뜀
-            print(f"Instance {instance_id} is not part of asg-smk3. Skipping.")
-            print("event 문규 테스트6")  # 차후 삭제
+        if not asg_name:  # ASG 소속이기만 하면 통과
             continue
 
-        # Get tags for the instance (Alarm=Y)
-        tags_response = ec2.describe_tags(  # EC2 태그 값 수집
-            Filters=[
-                {'Name': 'resource-id', 'Values': [instance_id]},
-                {'Name': 'key', 'Values': ['Alarm']}
-            ]
-        )
-        print("event 문규 테스트7")  # 차후 삭제
-
-        tags = tags_response.get('Tags', [])  # 수집된 태그 리스트 저장
-
-        alarm_tag = next((tag for tag in tags if tag['Key'] == 'Alarm' and tag['Value'] == 'Y'), None)
-
-        print("event 문규 테스트8")  # 차후 삭제
-
-        if not alarm_tag:
-            print(f"No Alarm=Y tag found for instance {instance_id}")
-            print("event 문규 테스트9")  # 차후 삭제
+        alarm_tags = ec2.describe_tags(Filters=[
+            {'Name': 'resource-id', 'Values': [instance_id]},
+            {'Name': 'key', 'Values': ['Alarm']}
+        ]).get('Tags', [])
+        if not any(tag['Key'] == 'Alarm' and tag['Value'] == 'Y' for tag in alarm_tags):
             continue
 
-        print(f"Creating alarms for instance {instance_id}")
-        print("event 문규 테스트10")  # 차후 삭제
-
-        # 위 변수를 근거로 create_alarm 수행
-        create_alarm(instance_name, instance_id, 'CPUUtilization', 'AWS/EC2', 'Percent', 50.0, 'Average')
+        # 표준 EC2 메트릭 알람 생성
+        create_alarm(instance_name, instance_id, 'CPUUtilization', 'AWS/EC2', 'Percent', 80.0, 'Average')
         create_alarm(instance_name, instance_id, 'StatusCheckFailed', 'AWS/EC2', 'Count', 1.0, 'Maximum')
-        create_alarm(instance_name, instance_id, 'mem_used_percent', 'CWAgent', 'Percent', 50.0, 'Average')
-        create_alarm(instance_name, instance_id, 'disk_used_percent', 'CWAgent', 'Percent', 50.0, 'Average')
+        # CWAgent 메트릭 알람 생성 (메모리, 디스크 사용률)
+        create_alarm(instance_name, instance_id, 'mem_used_percent', 'CWAgent', 'Percent', 80.0, 'Average')
+        create_alarm(instance_name, instance_id, 'disk_used_percent', 'CWAgent', 'Percent', 80.0, 'Average')
 
 
-def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold, statistic):  # 알람생성함수
-    alarm_base_name = f'{instance_name}-{instance_id}-{metric_name}'  # 기본 알람 이름 구성
+def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold, statistic):
+    """
+    인스턴스 정보 기반으로 CloudWatch 알람 생성을 위한 Dimension 구성 및 호출
+    """
+    alarm_name = f'{instance_name}-{instance_id}-{metric_name}'
 
-    # 1. CPU / StatusCheck 관련 메트릭은 기존 방식 유지
-    if metric_name in ['CPUUtilization', 'StatusCheckFailed']:
-        alarm_name = alarm_base_name
+    # EC2 인스턴스 상세 정보 가져오기
+    ec2_info = ec2.describe_instances(InstanceIds=[instance_id])
+    reservations = ec2_info.get('Reservations', [])
+    if not reservations or not reservations[0]['Instances']:
+        print(f"[ERROR] 인스턴스 정보를 가져올 수 없음: {instance_id}")
+        return
 
-        existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])  # 이미 존재하는 alarm인지 확인
+    instance_info = reservations[0]['Instances'][0]
+    image_id = instance_info['ImageId']
+    instance_type = instance_info['InstanceType']
+
+    # AutoScalingGroupName은 태그로부터 가져오기
+    tags = instance_info.get('Tags', [])
+    asg_name = next((tag['Value'] for tag in tags if tag['Key'] == 'aws:autoscaling:groupName'), None)
+
+    # CWAgent namespace인 경우, 전체 Dimension 조합 사용
+    if namespace == "CWAgent" and asg_name:
+        dimensions = [
+            {'Name': 'InstanceId', 'Value': instance_id},
+            {'Name': 'AutoScalingGroupName', 'Value': asg_name},
+            {'Name': 'ImageId', 'Value': image_id},
+            {'Name': 'InstanceType', 'Value': instance_type}
+        ]
+
+        # 디스크 사용률 알람인 경우 추가 Dimension 필요
+        if metric_name == "disk_used_percent":
+            dimensions += [
+                {'Name': 'path', 'Value': '/'},                 # 일반적으로 루트 디스크 기준
+                {'Name': 'device', 'Value': 'nvme0n1p1'},       # EC2 유형에 따라 달라질 수 있음 (사용자 서버 내 df 명령을 통해 /와 연계된 device 값을 넣어줌)(rootfs가 표현되면 /의 심볼릭 링크이므로  rootfs로 넣어주면 관리가 용이)
+                {'Name': 'fstype', 'Value': 'xfs'}              # AL2, AL2023은 xfs가 일반적 (사용자 서버 내 df 명령을 통해 /와 연계된 fstype 값을 넣어줌)(rootfs가 표현되면 /의 심볼릭 링크이므로  rootfs로 넣어주면 관리가 용이)
+            ]
+    else:
+        # AWS/EC2 표준 메트릭은 InstanceId만 사용
+        dimensions = [{'Name': 'InstanceId', 'Value': instance_id}]
+
+    _create_alarm(alarm_name, metric_name, namespace, dimensions, unit, threshold, statistic)
+
+
+def _create_alarm(alarm_name, metric_name, namespace, dims, unit, threshold, statistic):
+    """
+    CloudWatch put_metric_alarm 호출을 통한 알람 실제 생성 로직
+    """
+    print(f"[CREATE] Attempting to create alarm: {alarm_name}")
+    try:
+        existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])
         if existing['MetricAlarms']:
-            print(f"Alarm {alarm_name} already exists.")
+            print(f"[SKIP] Alarm already exists: {alarm_name}")
             return
 
-        cloudwatch.put_metric_alarm(  # 새 CloudWatch 알람 생성
+        cloudwatch.put_metric_alarm(
             AlarmName=alarm_name,
             ComparisonOperator='GreaterThanThreshold',
             EvaluationPeriods=2,
@@ -130,124 +123,14 @@ def create_alarm(instance_name, instance_id, metric_name, namespace, unit, thres
             Period=300,
             Statistic=statistic,
             Threshold=threshold,
-            ActionsEnabled=False,
-            AlarmDescription=f'{metric_name} alarm for {instance_id}',
-            Dimensions=[
-                {'Name': 'InstanceId', 'Value': instance_id}
-            ],
+            ActionsEnabled=False,  # SNS 연동 시 True로 변경
+            # AlarmActions=[
+            #     'arn:aws:sns:ap-northeast-2:983460235393:sns-smk-topic'  # ✅ SNS ARN 추가
+            # ],
+            AlarmDescription=f'{metric_name} alarm',
+            Dimensions=dims,
             Unit=unit
         )
-        print(f"Created alarm: {alarm_name}")
-
-    # 2. mem_used_percent는 CWAgent 메트릭이며 dimensions가 다양하므로 list_metrics로 조회 후 알람 생성
-    elif metric_name == 'mem_used_percent' and namespace == 'CWAgent':
-        metrics = cloudwatch.list_metrics(
-            Namespace='CWAgent',
-            MetricName='mem_used_percent',
-            Dimensions=[
-                {'Name': 'InstanceId', 'Value': instance_id}
-            ]
-        )
-
-        for metric in metrics.get('Metrics', []):
-            dims = metric['Dimensions']
-
-            # dimension 조합별로 알람 이름 유니크하게 구성 (예: objectname-Memory 등)
-            dim_suffix = '-'.join([f"{d['Value'].replace('/', '')}" for d in dims if d['Name'] != 'InstanceId'])
-            alarm_name = f'{alarm_base_name}-{dim_suffix}'
-
-            # 최근 데이터가 존재하는 dimension만 알람 생성
-            data = cloudwatch.get_metric_statistics(
-                Namespace=namespace,
-                MetricName=metric_name,
-                Dimensions=dims,
-                StartTime=datetime.utcnow() - timedelta(minutes=10),
-                EndTime=datetime.utcnow(),
-                Period=300,
-                Statistics=[statistic]
-            )
-
-            if not data.get('Datapoints'):
-                print(f"[mem_used_percent] Skipping alarm {alarm_name} (no recent datapoints)")
-                continue
-
-            existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])
-            if existing['MetricAlarms']:
-                print(f"Alarm {alarm_name} already exists.")
-                continue
-
-            cloudwatch.put_metric_alarm(
-                AlarmName=alarm_name,
-                ComparisonOperator='GreaterThanThreshold',
-                EvaluationPeriods=2,
-                MetricName=metric_name,
-                Namespace=namespace,
-                Period=300,
-                Statistic=statistic,
-                Threshold=threshold,
-                ActionsEnabled=False,
-                AlarmDescription=f'{metric_name} alarm for {instance_id}',
-                Dimensions=dims,  # list_metrics에서 추출한 실제 수집 dimension 사용
-                Unit=unit
-            )
-            print(f"Created alarm: {alarm_name}")
-
-    # 3. disk_used_percent는 CWAgent 메트릭이며 path가 '/'인 경우만 알람 생성
-    elif metric_name == 'disk_used_percent' and namespace == 'CWAgent':
-        metrics = cloudwatch.list_metrics(
-            Namespace='CWAgent',
-            MetricName='disk_used_percent',
-            Dimensions=[
-                {'Name': 'InstanceId', 'Value': instance_id}
-            ]
-        )
-
-        for metric in metrics.get('Metrics', []):
-            dims = metric['Dimensions']
-
-            # path가 '/'인 dimension만 필터링
-            path_dim = next((d for d in dims if d['Name'] == 'path'), None)
-            if not path_dim or path_dim['Value'] != '/':
-
-                # 알람 이름에 path, fstype 등 유니크 구성
-                dim_suffix = '-'.join([f"{d['Value'].replace('/', '')}" for d in dims if d['Name'] != 'InstanceId'])
-                alarm_name = f'{alarm_base_name}-{dim_suffix}'
-
-            # 최근 데이터가 존재하는 dimension만 알람 생성
-            data = cloudwatch.get_metric_statistics(
-                Namespace=namespace,
-                MetricName=metric_name,
-                Dimensions=dims,
-                StartTime=datetime.utcnow() - timedelta(minutes=10),
-                EndTime=datetime.utcnow(),
-                Period=300,
-                Statistics=[statistic]
-            )
-
-            if not data.get('Datapoints'):
-                print(f"[disk_used_percent] Skipping alarm {alarm_name} (no recent datapoints)")
-                continue
-
-            existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])
-            if existing['MetricAlarms']:
-                print(f"Alarm {alarm_name} already exists.")
-                continue
-
-            cloudwatch.put_metric_alarm(
-                AlarmName=alarm_name,
-                ComparisonOperator='GreaterThanThreshold',
-                EvaluationPeriods=2,
-                MetricName=metric_name,
-                Namespace=namespace,
-                Period=300,
-                Statistic=statistic,
-                Threshold=threshold,
-                ActionsEnabled=False,
-                AlarmDescription=f'{metric_name} alarm for {instance_id}',
-                Dimensions=dims,  #  '/' 경로가 포함된 실제 dimension 사용
-                Unit=unit
-            )
-            print(f"Created alarm: {alarm_name}")
-
-    else:
-        print(f"[SKIP] Metric {metric_name} not handled explicitly.")
+        print(f"[SUCCESS] Created alarm: {alarm_name}")
+    except Exception as e:
+        print(f"[ERROR] Failed to create alarm {alarm_name}: {e}")
