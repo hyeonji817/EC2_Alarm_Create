@@ -1,7 +1,9 @@
+# 최종 20250731 마무리
+
 import boto3
 import json
 
-# (local용)
+# # (local용)
 #session = boto3.Session(
 #    aws_access_key_id="계정 Access Key",
 #    aws_secret_access_key="계정 Secret Key",
@@ -10,23 +12,38 @@ import json
 # ec2 = session.client('ec2')  # ec2 객체 생성
 # cloudwatch = session.client('cloudwatch')  # cloudwatch 객체 생성
 
-# (aws lambda용)
+# # (aws lambda용)
 ec2 = boto3.client('ec2')  # ec2 객체 생성
 cloudwatch = boto3.client('cloudwatch')  # cloudwatch 객체 생성
 
 
 def lambda_handler(event, context):  # event와, context는 각각 이벤트가 발생하면 aws에서 넣어주는 데이터와, 내부 구성 객체를 의미
-    print("event 문규 테스트")  # 차후 삭제
+    print("event 문규 테스트1")  # 차후 삭제
     print("Received event:", event)
-    print("event 문규 테스트")  # 차후 삭제
 
     #### 이벤트가 EC2 인스턴스 생성 이벤트인지 판별
     if event.get('detail', {}).get('eventName') != 'RunInstances':  # RunInstances 이벤트가 아니면 종료
         print("Not an EC2 RunInstances event.")
-        print(json.dumps(event, indent=2))
+        print("event 문규 테스트2")  # 차후 삭제
+        return
+    # event : EventBridge, API Gateway, S3, CloudTrail 등 **트리거(source)**가 발생시 전달되는 JSON 데이터.    # 예: CloudTrail 이벤트일 경우 CloudTrail 로그 구조와 동일한 데이터
+    # context : Lambda 실행 환경 정보 (실행 시간, 함수 이름, AWS 요청 ID 등 포함된 메타 정보 객체)
+
+    # [변경] responseElements 존재 여부 체크 (NoneType 오류 방지)
+    response_elements = event.get('detail', {}).get('responseElements')
+    if not response_elements:
+        print("No responseElements found in the event. Skipping.")
+        print("event 문규 테스트3")  # 차후 삭제
         return
 
-    instances = event['detail']['responseElements']['instancesSet']['items']  # 생성된 인스턴스 목록 리스트 추출
+    # [변경] instancesSet 하위 items 접근 전 안전하게 처리
+    instances_set = response_elements.get('instancesSet', {})
+    instances = instances_set.get('items', [])
+    if not instances:
+        print("No instances found in the event. Skipping.")
+        print("event 문규 테스트4")  # 차후 삭제
+        return
+
     for instance in instances:  # 인스턴스 각각에 대해 순회
         instance_id = instance['instanceId']
 
@@ -40,6 +57,7 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
         name_tags = name_tag_response.get('Tags', [])
         name_tag = next((tag for tag in name_tags if tag['Key'] == 'Name'), None)
         instance_name = name_tag['Value'] if name_tag else instance_id  # 이름 없으면 ID 사용
+        print("event 문규 테스트5")  # 차후 삭제
 
         # [추가] Auto Scaling Group 이름이 'asg-smk3'인지 확인
         # EC2 인스턴스에 할당된 태그 중 'aws:autoscaling:groupName' 키의 값을 확인
@@ -56,6 +74,7 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
         )
         if not asg_tag:  # asg-smk3에 속하지 않은 경우 건너뜀
             print(f"Instance {instance_id} is not part of asg-smk3. Skipping.")
+            print("event 문규 테스트6")  # 차후 삭제
             continue
 
         # Get tags for the instance (Alarm=Y)
@@ -65,23 +84,21 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
                 {'Name': 'key', 'Values': ['Alarm']}
             ]
         )
-        print("tag_response 문규 테스트")  # 차후 삭제
-        print(tags_response)
-        print("tag_response 문규 테스트")  # 차후 삭제
 
         tags = tags_response.get('Tags', [])  # 수집된 태그 리스트 저장
+        print("event 문규 테스트7")  # 차후 삭제
 
         alarm_tag = next((tag for tag in tags if tag['Key'] == 'Alarm' and tag['Value'] == 'Y'), None)
 
-        print("tag_response 문규 테스트")  # 차후 삭제
-        print(alarm_tag)
-        print("tag_response 문규 테스트")  # 차후 삭제
+        print("event 문규 테스트8")  # 차후 삭제
 
         if not alarm_tag:
             print(f"No Alarm=Y tag found for instance {instance_id}")
+            print("event 문규 테스트9")  # 차후 삭제
             continue
 
         print(f"Creating alarms for instance {instance_id}")
+        print("event 문규 테스트10")  # 차후 삭제
 
         # 위 변수를 근거로 create_alarm 수행
         create_alarm(instance_name, instance_id, 'CPUUtilization', 'AWS/EC2', 'Percent', 50.0, 'Average')
