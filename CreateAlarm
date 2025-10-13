@@ -1,7 +1,5 @@
 import boto3
 import json
-#Github v1.0
-
 
 # (local용)
 #session = boto3.Session(
@@ -23,20 +21,36 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
     print("event 문규 테스트")  # 차후 삭제
 
     #### 이벤트가 EC2 인스턴스 생성 이벤트인지 판별 (event 딕셔너리의 detail 키에 대해, eventName 키에 대한 값이 RunInstances와 일치한지 유무)
-    if event.get('detail', {}).get(
-            'eventName') != 'RunInstances':  # event에 데이터를 추출(내장함수get), 그 데이터에서 eventName 값 추출 -> 그 이후 RunInstances 값과 일치하지 않으면 리턴 후 함수 종료
+    if event.get('detail', {}).get('eventName') != 'RunInstances':  # RunInstances 이벤트가 아니면 종료
         print("Not an EC2 RunInstances event.")
         print(json.dumps(event, indent=2))
         return
 
-    instances = event['detail']['responseElements']['instancesSet']['items']  # event 내 Key 하위트리 검색(인스턴스 목록 추출) detail -> responseElements -> instancesSet -> items (추출된 값은 list)
-    for instance in instances:  # 추출된 instances 리스트 값을 순회하며 각 인스턴스 정보를 instance 변수(변수 구조체)에 담음
+    instances = event['detail']['responseElements']['instancesSet']['items']  # 생성된 인스턴스 목록 리스트 추출
+    for instance in instances:  # 인스턴스 각각에 대해 순회
         instance_id = instance['instanceId']
         instance_name = instance['instanceName']
 
-        # Get tags for the instance
+        # [추가] Auto Scaling Group 이름이 'asg-smk3'인지 확인
+        # EC2 인스턴스에 할당된 태그 중 'aws:autoscaling:groupName' 키의 값을 확인
+        asg_tags_response = ec2.describe_tags(
+            Filters=[
+                {'Name': 'resource-id', 'Values': [instance_id]},  # 인스턴스 ID로 태그 조회
+                {'Name': 'key', 'Values': ['aws:autoscaling:groupName']}  # Auto Scaling Group 태그 필터
+            ]
+        )
+        asg_tags = asg_tags_response.get('Tags', [])  # 반환값에서 태그 목록 추출
+        asg_tag = next(
+            (tag for tag in asg_tags if tag['Key'] == 'aws:autoscaling:groupName' and tag['Value'] == 'asg-smk3'),
+            None
+        )
+        if not asg_tag:  # asg-smk3에 속하지 않은 경우 건너뜀
+            print(f"Instance {instance_id} is not part of asg-smk3. Skipping.")
+            continue
+
+        # Get tags for the instance (Alarm=Y)
         tags_response = ec2.describe_tags(  # EC2 태그 값 수집
-            Filters=[  # filter의 value는 리스트형으로 진행해야함.
+            Filters=[
                 {'Name': 'resource-id', 'Values': [instance_id]},
                 {'Name': 'key', 'Values': ['Alarm']}
             ]
@@ -45,10 +59,9 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
         print(tags_response)
         print("tag_response 문규 테스트")  # 차후 삭제
 
-        tags = tags_response.get('Tags', [])  # 수집된 repsonse 값 확인 후 tags 변수에 리스트 값 보관
+        tags = tags_response.get('Tags', [])  # 수집된 태그 리스트 저장
 
-        alarm_tag = next((tag for tag in tags if tag['Key'] == 'Alarm' and tag['Value'] == 'Y'),
-                         None)  # next는 조건에 맞는 첫번째 항목 반환, 없으면 none)
+        alarm_tag = next((tag for tag in tags if tag['Key'] == 'Alarm' and tag['Value'] == 'Y'), None)
 
         print("tag_response 문규 테스트")  # 차후 삭제
         print(alarm_tag)
@@ -61,26 +74,21 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
         print(f"Creating alarms for instance {instance_id}")
 
         # 위 변수를 근거로 create_alarm 수행
-        create_alarm(instance_name, instance_id, 'CPUUtilization', 'AWS/EC2', 'Percent', 50.0,
-                     'Average')  # 차후 수정 (기존 80)
-        create_alarm(instance_name, instance_id, 'StatusCheckFailed', 'AWS/EC2', 'Count', 1.0,
-                     'Maximum')  # 차후 수정 (기존 80)
-        create_alarm(instance_name, instance_id, 'mem_used_percent', 'CWAgent', 'Percent', 50.0,
-                     'Average')  # 차후 수정 (기존 80)
-        create_alarm(instance_name, instance_id, 'disk_used_percent', 'CWAgent', 'Percent', 50.0,
-                     'Average')  # 차후 수정 (기존 80)
+        create_alarm(instance_name, instance_id, 'CPUUtilization', 'AWS/EC2', 'Percent', 50.0, 'Average')
+        create_alarm(instance_name, instance_id, 'StatusCheckFailed', 'AWS/EC2', 'Count', 1.0, 'Maximum')
+        create_alarm(instance_name, instance_id, 'mem_used_percent', 'CWAgent', 'Percent', 50.0, 'Average')
+        create_alarm(instance_name, instance_id, 'disk_used_percent', 'CWAgent', 'Percent', 50.0, 'Average')
 
 
-def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold,
-                 statistic):  # 알람생성함수, 인자값은 앞에서 생성한 것과 태그, 그리고 지정된 값들을 바탕으로 한다.
+def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold, statistic):
     alarm_name = f'{instance_name}-{instance_id}-{metric_name}'
 
-    existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])  # 이미 존재하는 alarm인지 유무 체크
+    existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])  # 이미 존재하는 alarm인지 확인
     if existing['MetricAlarms']:
         print(f"Alarm {alarm_name} already exists.")
         return
 
-    cloudwatch.put_metric_alarm(  # AWS 내 알람생성 수행
+    cloudwatch.put_metric_alarm(  # 새 CloudWatch 알람 생성
         AlarmName=alarm_name,
         ComparisonOperator='GreaterThanThreshold',
         EvaluationPeriods=2,
