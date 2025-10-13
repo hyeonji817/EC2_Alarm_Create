@@ -1,0 +1,99 @@
+import boto3
+import json
+#Github v1.0
+
+
+# (local용)
+#session = boto3.Session(
+#    aws_access_key_id="계정 Access Key",
+#    aws_secret_access_key="계정 Secret Key",
+#    region_name=SUPPORT_REGION,  # 세션의 기본 리전도 맞춰둠
+# )
+# ec2 = session.client('ec2')  # ec2 객체 생성
+# cloudwatch = session.client('cloudwatch')  # cloudwatch 객체 생성
+
+# (aws lambda용)
+ec2 = boto3.client('ec2')  # ec2 객체 생성
+cloudwatch = boto3.client('cloudwatch')  # cloudwatch 객체 생성
+
+
+def lambda_handler(event, context):  # event와, context는 각각 이벤트가 발생하면 aws에서 넣어주는 데이터와, 내부 구성 객체르 의미
+    print("event 문규 테스트")  # 차후 삭제
+    print("Received event:", event)
+    print("event 문규 테스트")  # 차후 삭제
+
+    #### 이벤트가 EC2 인스턴스 생성 이벤트인지 판별 (event 딕셔너리의 detail 키에 대해, eventName 키에 대한 값이 RunInstances와 일치한지 유무)
+    if event.get('detail', {}).get(
+            'eventName') != 'RunInstances':  # event에 데이터를 추출(내장함수get), 그 데이터에서 eventName 값 추출 -> 그 이후 RunInstances 값과 일치하지 않으면 리턴 후 함수 종료
+        print("Not an EC2 RunInstances event.")
+        print(json.dumps(event, indent=2))
+        return
+
+    instances = event['detail']['responseElements']['instancesSet']['items']  # event 내 Key 하위트리 검색(인스턴스 목록 추출) detail -> responseElements -> instancesSet -> items (추출된 값은 list)
+    for instance in instances:  # 추출된 instances 리스트 값을 순회하며 각 인스턴스 정보를 instance 변수(변수 구조체)에 담음
+        instance_id = instance['instanceId']
+        instance_name = instance['instanceName']
+
+        # Get tags for the instance
+        tags_response = ec2.describe_tags(  # EC2 태그 값 수집
+            Filters=[  # filter의 value는 리스트형으로 진행해야함.
+                {'Name': 'resource-id', 'Values': [instance_id]},
+                {'Name': 'key', 'Values': ['Alarm']}
+            ]
+        )
+        print("tag_response 문규 테스트")  # 차후 삭제
+        print(tags_response)
+        print("tag_response 문규 테스트")  # 차후 삭제
+
+        tags = tags_response.get('Tags', [])  # 수집된 repsonse 값 확인 후 tags 변수에 리스트 값 보관
+
+        alarm_tag = next((tag for tag in tags if tag['Key'] == 'Alarm' and tag['Value'] == 'Y'),
+                         None)  # next는 조건에 맞는 첫번째 항목 반환, 없으면 none)
+
+        print("tag_response 문규 테스트")  # 차후 삭제
+        print(alarm_tag)
+        print("tag_response 문규 테스트")  # 차후 삭제
+
+        if not alarm_tag:
+            print(f"No Alarm=Y tag found for instance {instance_id}")
+            continue
+
+        print(f"Creating alarms for instance {instance_id}")
+
+        # 위 변수를 근거로 create_alarm 수행
+        create_alarm(instance_name, instance_id, 'CPUUtilization', 'AWS/EC2', 'Percent', 50.0,
+                     'Average')  # 차후 수정 (기존 80)
+        create_alarm(instance_name, instance_id, 'StatusCheckFailed', 'AWS/EC2', 'Count', 1.0,
+                     'Maximum')  # 차후 수정 (기존 80)
+        create_alarm(instance_name, instance_id, 'mem_used_percent', 'CWAgent', 'Percent', 50.0,
+                     'Average')  # 차후 수정 (기존 80)
+        create_alarm(instance_name, instance_id, 'disk_used_percent', 'CWAgent', 'Percent', 50.0,
+                     'Average')  # 차후 수정 (기존 80)
+
+
+def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold,
+                 statistic):  # 알람생성함수, 인자값은 앞에서 생성한 것과 태그, 그리고 지정된 값들을 바탕으로 한다.
+    alarm_name = f'{instance_name}-{instance_id}-{metric_name}'
+
+    existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])  # 이미 존재하는 alarm인지 유무 체크
+    if existing['MetricAlarms']:
+        print(f"Alarm {alarm_name} already exists.")
+        return
+
+    cloudwatch.put_metric_alarm(  # AWS 내 알람생성 수행
+        AlarmName=alarm_name,
+        ComparisonOperator='GreaterThanThreshold',
+        EvaluationPeriods=2,
+        MetricName=metric_name,
+        Namespace=namespace,
+        Period=300,
+        Statistic=statistic,
+        Threshold=threshold,
+        ActionsEnabled=False,
+        AlarmDescription=f'{metric_name} alarm for {instance_id}',
+        Dimensions=[
+            {'Name': 'InstanceId', 'Value': instance_id}
+        ],
+        Unit=unit
+    )
+    print(f"Created alarm: {alarm_name}")
