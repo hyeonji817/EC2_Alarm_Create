@@ -15,12 +15,12 @@ ec2 = boto3.client('ec2')  # ec2 객체 생성
 cloudwatch = boto3.client('cloudwatch')  # cloudwatch 객체 생성
 
 
-def lambda_handler(event, context):  # event와, context는 각각 이벤트가 발생하면 aws에서 넣어주는 데이터와, 내부 구성 객체르 의미
+def lambda_handler(event, context):  # event와, context는 각각 이벤트가 발생하면 aws에서 넣어주는 데이터와, 내부 구성 객체를 의미
     print("event 문규 테스트")  # 차후 삭제
     print("Received event:", event)
     print("event 문규 테스트")  # 차후 삭제
 
-    #### 이벤트가 EC2 인스턴스 생성 이벤트인지 판별 (event 딕셔너리의 detail 키에 대해, eventName 키에 대한 값이 RunInstances와 일치한지 유무)
+    #### 이벤트가 EC2 인스턴스 생성 이벤트인지 판별
     if event.get('detail', {}).get('eventName') != 'RunInstances':  # RunInstances 이벤트가 아니면 종료
         print("Not an EC2 RunInstances event.")
         print(json.dumps(event, indent=2))
@@ -29,14 +29,24 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
     instances = event['detail']['responseElements']['instancesSet']['items']  # 생성된 인스턴스 목록 리스트 추출
     for instance in instances:  # 인스턴스 각각에 대해 순회
         instance_id = instance['instanceId']
-        instance_name = instance['instanceName']
+
+        # [추가] EC2 인스턴스의 이름(Name 태그) 추출
+        name_tag_response = ec2.describe_tags(
+            Filters=[
+                {'Name': 'resource-id', 'Values': [instance_id]},
+                {'Name': 'key', 'Values': ['Name']}
+            ]
+        )
+        name_tags = name_tag_response.get('Tags', [])
+        name_tag = next((tag for tag in name_tags if tag['Key'] == 'Name'), None)
+        instance_name = name_tag['Value'] if name_tag else instance_id  # 이름 없으면 ID 사용
 
         # [추가] Auto Scaling Group 이름이 'asg-smk3'인지 확인
         # EC2 인스턴스에 할당된 태그 중 'aws:autoscaling:groupName' 키의 값을 확인
         asg_tags_response = ec2.describe_tags(
             Filters=[
-                {'Name': 'resource-id', 'Values': [instance_id]},  # 인스턴스 ID로 태그 조회
-                {'Name': 'key', 'Values': ['aws:autoscaling:groupName']}  # Auto Scaling Group 태그 필터
+                {'Name': 'resource-id', 'Values': [instance_id]},
+                {'Name': 'key', 'Values': ['aws:autoscaling:groupName']}
             ]
         )
         asg_tags = asg_tags_response.get('Tags', [])  # 반환값에서 태그 목록 추출
@@ -80,7 +90,7 @@ def lambda_handler(event, context):  # event와, context는 각각 이벤트가 
         create_alarm(instance_name, instance_id, 'disk_used_percent', 'CWAgent', 'Percent', 50.0, 'Average')
 
 
-def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold, statistic):
+def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold, statistic):  # 알람생성함수
     alarm_name = f'{instance_name}-{instance_id}-{metric_name}'
 
     existing = cloudwatch.describe_alarms(AlarmNames=[alarm_name])  # 이미 존재하는 alarm인지 확인
