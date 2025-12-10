@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 ec2 = boto3.client('ec2')
 cloudwatch = boto3.client('cloudwatch')
 
-# Lambda_handler 구현
+# Lambda_handler 구현 
 def lambda_handler(event, context):
     """
     EC2 인스턴스가 Auto Scaling Group에 의해 생성되었을 때 알람을 자동으로 설정하는 Lambda 핸들러
@@ -58,7 +58,7 @@ def lambda_handler(event, context):
         create_alarm(instance_name, instance_id, 'mem_used_percent', 'CWAgent', 'Percent', 80.0, 'Average')
         create_alarm(instance_name, instance_id, 'disk_used_percent', 'CWAgent', 'Percent', 80.0, 'Average')
 
-
+# 알람생성
 def create_alarm(instance_name, instance_id, metric_name, namespace, unit, threshold, statistic):
     """
     인스턴스 정보 기반으로 CloudWatch 알람 생성을 위한 Dimension 구성 및 호출
